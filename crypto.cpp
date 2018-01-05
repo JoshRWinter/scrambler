@@ -1,4 +1,5 @@
 #include <array>
+#include <iostream>
 
 #include <openssl/evp.h>
 #include <openssl/aes.h>
@@ -7,7 +8,7 @@
 
 #include "crypto.h"
 
-#define DEBUG(x) (std::string("[ ") + __FILE__ + ": " + __func__ + ": " + std::to_string(__LINE__) + "] " + x)
+#define DEBUG(x) (std::string("[") + __FILE__ + ": " + __func__ + ": " + std::to_string(__LINE__) + "] " + x)
 
 // back-end encrypt & decrypt functions
 static void scramble(const std::vector<unsigned char>&, const std::array<unsigned char, 32>&, const std::array<unsigned char, 16>&, std::vector<unsigned char>&);
@@ -44,7 +45,7 @@ void crypto::decrypt(const std::string &password, const std::vector<unsigned cha
 	// compute key and iv
 	stretch(password, key, iv);
 
-	plaintext.resize(ciphertext.size());
+	plaintext.resize(ciphertext.size() + 256);
 	unscramble(ciphertext, key, iv, plaintext);
 }
 
@@ -52,7 +53,7 @@ void scramble(const std::vector<unsigned char> &plaintext, const std::array<unsi
 	EVP_CIPHER_CTX *ctx;
 	std::string err;
 	int cipherlen = 0;
-	int len;
+	int len = 0;
 
 	// construct the context
 	if(!(ctx = EVP_CIPHER_CTX_new())){
@@ -67,14 +68,11 @@ void scramble(const std::vector<unsigned char> &plaintext, const std::array<unsi
 	}
 
 	// encryption block loop
-	for(std::vector<unsigned char>::size_type i = 0; i < plaintext.size(); i += 256){
-		if(1 != EVP_EncryptUpdate(ctx, &ciphertext[i], &len, &plaintext[i], plaintext.size() - i)){
-			err = DEBUG("couldn't encrypt " + std::to_string(i) + " block");
-			goto error;
-		}
-
-		cipherlen += len;
+	if(1 != EVP_EncryptUpdate(ctx, &ciphertext[0], &len, &plaintext[0], plaintext.size())){
+		err = DEBUG("couldn't encrypt block");
+		goto error;
 	}
+	cipherlen += len;
 
 	// finalize the encryption operation
 	if(1 != EVP_EncryptFinal_ex(ctx, &ciphertext[cipherlen], &len)){
@@ -96,7 +94,7 @@ error:
 void unscramble(const std::vector<unsigned char> &ciphertext, const std::array<unsigned char, 32> &key, const std::array<unsigned char, 16> &iv, std::vector<unsigned char> &plaintext){
 	EVP_CIPHER_CTX *ctx;
 	int plainlen = 0;
-	int len;
+	int len = 0;
 	std::string err;
 
 	// construct evp context
@@ -112,14 +110,11 @@ void unscramble(const std::vector<unsigned char> &ciphertext, const std::array<u
 	}
 
 	// decryption block loop
-	for(std::vector<unsigned char>::size_type i = 0; i < ciphertext.size(); i += 256){
-		if(1 != EVP_DecryptUpdate(ctx, &plaintext[i], &len, &ciphertext[i], ciphertext.size() - i)){
-			err = DEBUG("couldn't decrypt " + std::to_string(i) + " block");
-			goto error;
-		}
-
-		plainlen += len;
+	if(1 != EVP_DecryptUpdate(ctx, &plaintext[0], &len, &ciphertext[0], ciphertext.size())){
+		err = DEBUG("couldn't decrypt block");
+		goto error;
 	}
+	plainlen += len;
 
 	// finalize the decryption operation
 	if(1 != EVP_DecryptFinal_ex(ctx, &plaintext[plainlen], &len)){
