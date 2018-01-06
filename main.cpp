@@ -45,6 +45,7 @@ static void decrypt(const std::string&, const std::string&);
 
 static int read(std::ifstream&, std::vector<unsigned char>&);
 static void write(std::ofstream&, const std::vector<unsigned char>&);
+static long long filesize(const std::string&);
 
 int main(int argc, char **argv){
 	if(argc != 3){
@@ -118,6 +119,7 @@ void encrypt(const std::string &passwd, const std::string &fname){
 	std::ifstream in(fname, std::ifstream::binary);
 	if(!in)
 		throw scrambler_exception("could not open file \"" + fname + "\" in read mode");
+	const long long filelen = filesize(fname);
 	std::ofstream out(fname + ".lock", std::ifstream::binary);
 	if(!out)
 		throw scrambler_exception("could not open file \"" + fname + ".lock\" in write mode");
@@ -140,10 +142,12 @@ void encrypt(const std::string &passwd, const std::string &fname){
 	int written = 0;
 	unsigned long long plaintext_checksum = 0;
 	int checksummed = 0;
+	long long bytesread = 0;
 	while(plaintext.size() == CHUNK_SIZE){
 		// read a chunk
 		const int got = read(in, plaintext);
 		plaintext.resize(got);
+		bytesread += got;
 
 		// update the plaintext checksum
 		if(checksummed < MAX_CHECKSUMMED){
@@ -162,7 +166,16 @@ void encrypt(const std::string &passwd, const std::string &fname){
 
 		// write it
 		write(out, ciphertext);
+
+		// status message
+		if(filelen > 5'000'000){
+			const int percent = ((float)bytesread / filelen) * 100;
+			std::cout << "  " << percent << "%\r" << std::flush;
+		}
 	}
+
+	if(filelen > 5'000'000)
+		std::cout << "  100%" << std::endl;
 
 	// finalize the operation
 	ciphertext.resize(crypto::BLOCK_SIZE);
@@ -196,6 +209,7 @@ void decrypt(const std::string &passwd, const std::string &fname){
 	std::ifstream in(fname, std::ifstream::binary);
 	if(!in)
 		throw scrambler_exception("could not open file \"" + fname + "\" in read mode");
+	const long long filelen = filesize(fname);
 
 	// read the header
 	char header[10] = "xxxxxxxxx";
@@ -224,9 +238,11 @@ void decrypt(const std::string &passwd, const std::string &fname){
 	unsigned long long confirm_checksum = 0;
 	int written = 0;
 	int checksummed = 0;
+	long long bytesread = 0;
 	while(ciphertext.size() == CHUNK_SIZE){
 		const int got = read(in, ciphertext);
 		ciphertext.resize(got);
+		bytesread += got;
 
 		// decrypt
 		plaintext.resize(ciphertext.size() + crypto::BLOCK_SIZE);
@@ -250,7 +266,15 @@ void decrypt(const std::string &passwd, const std::string &fname){
 
 		// write
 		write(out, plaintext);
+
+		if(filelen > 5'000'000){
+			const int percent = ((double)bytesread / filelen) * 100;
+			std::cout << "  " << percent << "%\r" << std::flush;
+		}
 	}
+
+	if(filelen > 5'000'000)
+		std::cout << "  100%" << std::endl;
 
 	plaintext.resize(crypto::BLOCK_SIZE);
 	try{
@@ -297,6 +321,16 @@ void write(std::ofstream &out, const std::vector<unsigned char> &contents){
 	const int attempt = contents.size();
 
 	out.write((char*)contents.data(), attempt);
+}
+
+long long filesize(const std::string &fname){
+#ifdef _WIN32
+	throw scrambler_exception("not implemented filesize");
+#else
+	struct stat buff;
+	stat(fname.c_str(), &buff);
+	return buff.st_size;
+#endif // _WIN32
 }
 
 // produce checksum given 'raw'
