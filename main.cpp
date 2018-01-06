@@ -18,6 +18,7 @@
 #define HEADER_LENGTH (strlen(MAGIC_STRING) + sizeof(unsigned long long))
 #define MAGIC_STRING "SCRAMBLED"
 #define CHUNK_SIZE 4096
+#define MAX_CHECKSUMMED 5010
 
 enum class task{
 	lock,
@@ -38,7 +39,7 @@ private:
 static int run(const std::string&, const std::string&);
 static void help();
 
-static unsigned long long checksum(const std::vector<unsigned char>&);
+static unsigned long long checksum(const unsigned char*, unsigned);
 static void encrypt(const std::string&, const std::string&);
 static void decrypt(const std::string&, const std::string&);
 
@@ -109,6 +110,10 @@ void encrypt(const std::string &passwd, const std::string &fname){
 			throw scrambler_exception("could not write to file \"" + fname + ".lock\", file already exists");
 	}
 
+	// see if file is already locked
+	if(fname.rfind(".lock") == fname.size() - 5)
+		throw scrambler_exception("file \"" + fname + "\" is already locked!");
+
 	// file streams
 	std::ifstream in(fname, std::ifstream::binary);
 	if(!in)
@@ -134,13 +139,21 @@ void encrypt(const std::string &passwd, const std::string &fname){
 
 	int written = 0;
 	unsigned long long plaintext_checksum = 0;
+	int checksummed = 0;
 	while(plaintext.size() == CHUNK_SIZE){
 		// read a chunk
 		const int got = read(in, plaintext);
 		plaintext.resize(got);
 
 		// update the plaintext checksum
-		plaintext_checksum += checksum(plaintext);
+		if(checksummed < MAX_CHECKSUMMED){
+			int checksumming = plaintext.size();
+			if(checksummed + checksumming > MAX_CHECKSUMMED)
+				checksumming -= (checksummed + checksumming) - MAX_CHECKSUMMED;
+
+			plaintext_checksum += checksum(plaintext.data(), checksumming);
+			checksummed += checksumming;
+		}
 
 		// encrypt it
 		ciphertext.resize(plaintext.size() + crypto::BLOCK_SIZE - 1);
@@ -210,6 +223,7 @@ void decrypt(const std::string &passwd, const std::string &fname){
 
 	unsigned long long confirm_checksum = 0;
 	int written = 0;
+	int checksummed = 0;
 	while(ciphertext.size() == CHUNK_SIZE){
 		const int got = read(in, ciphertext);
 		ciphertext.resize(got);
@@ -220,7 +234,19 @@ void decrypt(const std::string &passwd, const std::string &fname){
 		plaintext.resize(written);
 
 		// update the confirmation checksum
-		confirm_checksum += checksum(plaintext);
+		if(checksummed < MAX_CHECKSUMMED){
+			int checksumming = plaintext.size();
+			if(checksummed + checksumming > MAX_CHECKSUMMED)
+				checksumming -= (checksummed + checksumming) - MAX_CHECKSUMMED;
+
+			confirm_checksum += checksum(plaintext.data(), checksumming);
+			checksummed += checksumming;
+		}
+		else if(confirm_checksum != plaintext_checksum){
+			out.close();
+			remove(output_fname.c_str());
+			throw scrambler_exception("incorrect password (checksum failure)");
+		}
 
 		// write
 		write(out, plaintext);
@@ -235,8 +261,16 @@ void decrypt(const std::string &passwd, const std::string &fname){
 		throw scrambler_exception("incorrect password (format error)");
 	}
 	plaintext.resize(written);
-	confirm_checksum += checksum(plaintext);
-	write(out, plaintext);
+
+	// update the confirmation checksum
+	if(checksummed < MAX_CHECKSUMMED){
+		int checksumming = plaintext.size();
+		if(checksummed + checksumming > MAX_CHECKSUMMED)
+			checksumming -= (checksummed + checksumming) - MAX_CHECKSUMMED;
+
+		confirm_checksum += checksum(plaintext.data(), checksumming);
+		checksummed += checksumming;
+	}
 
 	if(confirm_checksum != plaintext_checksum){
 		out.close();
@@ -244,6 +278,7 @@ void decrypt(const std::string &passwd, const std::string &fname){
 		throw scrambler_exception("incorrect password (checksum failure)");
 	}
 
+	write(out, plaintext);
 }
 
 // return file contents
@@ -265,11 +300,17 @@ void write(std::ofstream &out, const std::vector<unsigned char> &contents){
 }
 
 // produce checksum given 'raw'
-unsigned long long checksum(const std::vector<unsigned char> &raw){
+unsigned long long checksum(const unsigned char *data, unsigned size){
 	unsigned long long sum = 0;
 
-	for(unsigned i = 0; i < raw.size(); ++i)
-		sum += raw[i];
+	for(unsigned i = 0; i < size; ++i){
+		if(data[i] > 100 && data[i] < 120)
+			sum += data[i] / 1.5;
+		else if(data[i] >= 120 && data[i] < 130)
+			sum += data[i] * 1.8;
+		else
+			sum += data[i];
+	}
 
 	return sum;
 }
