@@ -4,12 +4,20 @@
 #include <exception>
 
 #include <string.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <unistd.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#endif
 
 #include "crypto.h"
 
 #define HEADER_LENGTH (strlen(MAGIC_STRING) + sizeof(unsigned long long))
 #define MAGIC_STRING "SCRAMBLED"
+#define CHUNK_SIZE 4096
 
 enum class task{
 	lock,
@@ -30,13 +38,12 @@ private:
 static int run(const std::string&, const std::string&);
 static void help();
 
-static bool scrambled(const std::vector<unsigned char>&);
 static unsigned long long checksum(const std::vector<unsigned char>&);
-static void encrypt(const std::string&, const std::vector<unsigned char>&, std::vector<unsigned char>&);
-static void decrypt(const std::string&, const std::vector<unsigned char>&, std::vector<unsigned char>&);
+static void encrypt(const std::string&, const std::string&);
+static void decrypt(const std::string&, const std::string&);
 
-static void read(const std::string&, std::vector<unsigned char>&);
-static void write(const std::string&, std::vector<unsigned char>&);
+static int read(std::ifstream&, std::vector<unsigned char>&);
+static void write(std::ofstream&, const std::vector<unsigned char>&);
 
 int main(int argc, char **argv){
 	if(argc != 3){
@@ -70,21 +77,6 @@ int run(const std::string &operation, const std::string &filename){
 		return 1;
 	}
 
-	// read the input file
-	std::vector<unsigned char> input;
-	read(filename, input);
-
-	const bool locked = scrambled(input);
-	if(action == task::lock && locked){
-		std::cout << "this file is already locked" << std::endl;
-		return 1;
-	}
-	else if(action == task::unlock && !locked){
-		std::cout << "this file is either corrupted or not locked" << std::endl;
-		return 1;
-	}
-
-	// get the password
 	const std::string password = getpass("enter password: ");
 	if(action == task::lock){
 		const std::string confirm = getpass("confirm password: ");
@@ -94,21 +86,11 @@ int run(const std::string &operation, const std::string &filename){
 		}
 	}
 
-	// encrypt or decrypt
-	std::vector<unsigned char> translated;
-	std::string outname; // output file name
 	if(action == task::lock){
-		encrypt(password, input, translated);
-
-		// write the result
-		write(filename + ".lock", translated);
-		remove(filename.c_str());
+		encrypt(password, filename);
 	}
 	else if(action == task::unlock){
-		decrypt(password, input, translated);
-
-		// write the result
-		write(filename.substr(0, filename.size() - 5), translated);
+		decrypt(password, filename);
 	}
 
 	return 0;
@@ -119,105 +101,175 @@ void help(){
 	std::cout << "help" << std::endl;
 }
 
-// determin if file is already scrambled
-bool scrambled(const std::vector<unsigned char> &r){
-	std::vector<unsigned char> raw = r;
+void encrypt(const std::string &passwd, const std::string &fname){
+	// test to see if output file already exists
+	{
+		std::ifstream test(fname + ".lock");
+		if(!!test)
+			throw scrambler_exception("could not write to file \"" + fname + ".lock\", file already exists");
+	}
 
-	if(raw.size() < HEADER_LENGTH)
-		return false;
+	// file streams
+	std::ifstream in(fname, std::ifstream::binary);
+	if(!in)
+		throw scrambler_exception("could not open file \"" + fname + "\" in read mode");
+	std::ofstream out(fname + ".lock", std::ifstream::binary);
+	if(!out)
+		throw scrambler_exception("could not open file \"" + fname + ".lock\" in write mode");
 
-	// magic check
-	if(raw.at(0) != 'S' || raw.at(1) != 'C' || raw.at(2) != 'R' ||
-		raw.at(3) != 'A' || raw.at(4) != 'M' || raw.at(5) != 'B' ||
-		raw.at(6) != 'L' || raw.at(7) != 'E' || raw.at(8) != 'D')
-		return false;
+	// write the header to the output file
+	const std::vector<unsigned char> header = {'S', 'C', 'R', 'A', 'M', 'B', 'L', 'E', 'D'};
+	write(out, header);
+	// write checksum placeholder
+	const unsigned long long placeholder = 0;
+	out.write((char*)&placeholder, sizeof(unsigned long long));
 
-	// checksum check
-	unsigned long long chksum;
-	memcpy(&chksum, &raw.at(9), sizeof(unsigned long long));
-	raw.erase(raw.begin(), raw.begin() + HEADER_LENGTH); // erase the header
-	if(chksum != checksum(raw))
-		return false;
+	// data buffers
+	std::vector<unsigned char> plaintext;
+	std::vector<unsigned char> ciphertext;
+	plaintext.resize(CHUNK_SIZE);
 
-	return true;
+	// encryption stream object
+	crypto::encrypt_stream stream(passwd);
+
+	int written = 0;
+	unsigned long long plaintext_checksum = 0;
+	while(plaintext.size() == CHUNK_SIZE){
+		// read a chunk
+		const int got = read(in, plaintext);
+		plaintext.resize(got);
+
+		// update the plaintext checksum
+		plaintext_checksum += checksum(plaintext);
+
+		// encrypt it
+		ciphertext.resize(plaintext.size() + crypto::BLOCK_SIZE - 1);
+		written = stream.encrypt(plaintext.data(), plaintext.size(), ciphertext.data(), ciphertext.size());
+		ciphertext.resize(written);
+
+		// write it
+		write(out, ciphertext);
+	}
+
+	// finalize the operation
+	ciphertext.resize(crypto::BLOCK_SIZE);
+	written = stream.finalize(ciphertext.data(), ciphertext.size());
+	ciphertext.resize(written);
+	write(out, ciphertext);
+
+	// write the plaintext checksum
+	out.seekp(9);
+	out.write((char*)&plaintext_checksum, sizeof(plaintext_checksum));
+
+	// remove the original file
+	remove(fname.c_str());
+}
+
+void decrypt(const std::string &passwd, const std::string &fname){
+	// test if file has correct name format
+	const unsigned index = fname.rfind(".lock");
+	const std::string output_fname = fname.substr(0, fname.size() - 5);
+	if(index != fname.length() - 5)
+		throw scrambler_exception("file \"" + fname + "\" does not have the correct name format");
+
+	// test to see if the output file already exists
+	{
+		std::ifstream test(output_fname);
+		if(!!test)
+			throw scrambler_exception("could not write to file \"" + output_fname + "\", file already exists!");
+	}
+
+	// input file stream
+	std::ifstream in(fname, std::ifstream::binary);
+	if(!in)
+		throw scrambler_exception("could not open file \"" + fname + "\" in read mode");
+
+	// read the header
+	char header[10] = "xxxxxxxxx";
+	in.read(header, 9);
+	header[9] = 0;
+	if(strcmp("SCRAMBLED", header))
+		throw scrambler_exception("file \"" + fname + "\" is not a locked file.");
+
+	// read the plaintext checksum
+	unsigned long long plaintext_checksum;
+	in.read((char*)&plaintext_checksum, sizeof(plaintext_checksum));
+
+	// output file stream
+	std::ofstream out(output_fname, std::ifstream::binary);
+	if(!out)
+		throw scrambler_exception("could not open file \"" + output_fname + "\" in write mode");
+
+	// data buffers
+	std::vector<unsigned char> plaintext;
+	std::vector<unsigned char> ciphertext;
+	ciphertext.resize(CHUNK_SIZE);
+
+	// decryption stream
+	crypto::decrypt_stream stream(passwd);
+
+	unsigned long long confirm_checksum = 0;
+	int written = 0;
+	while(ciphertext.size() == CHUNK_SIZE){
+		const int got = read(in, ciphertext);
+		ciphertext.resize(got);
+
+		// decrypt
+		plaintext.resize(ciphertext.size() + crypto::BLOCK_SIZE);
+		written = stream.decrypt(ciphertext.data(), ciphertext.size(), plaintext.data(), plaintext.size());
+		plaintext.resize(written);
+
+		// update the confirmation checksum
+		confirm_checksum += checksum(plaintext);
+
+		// write
+		write(out, plaintext);
+	}
+
+	plaintext.resize(crypto::BLOCK_SIZE);
+	try{
+		written = stream.finalize(plaintext.data(), plaintext.size());
+	}catch(const crypto::exception &e){
+		out.close();
+		remove(output_fname.c_str());
+		throw scrambler_exception("incorrect password (format error)");
+	}
+	plaintext.resize(written);
+	confirm_checksum += checksum(plaintext);
+	write(out, plaintext);
+
+	if(confirm_checksum != plaintext_checksum){
+		out.close();
+		remove(output_fname.c_str());
+		throw scrambler_exception("incorrect password (checksum failure)");
+	}
+
+}
+
+// return file contents
+int read(std::ifstream &in, std::vector<unsigned char> &contents){
+	const int attempt = contents.size();
+
+	in.read((char*)contents.data(), attempt);
+
+	const int got = in.gcount();
+
+	return got;
+}
+
+// write file data
+void write(std::ofstream &out, const std::vector<unsigned char> &contents){
+	const int attempt = contents.size();
+
+	out.write((char*)contents.data(), attempt);
 }
 
 // produce checksum given 'raw'
 unsigned long long checksum(const std::vector<unsigned char> &raw){
 	unsigned long long sum = 0;
 
-	for(unsigned i = HEADER_LENGTH; i < raw.size(); ++i)
+	for(unsigned i = 0; i < raw.size(); ++i)
 		sum += raw[i];
 
 	return sum;
-}
-
-// encrypt a file and compute the header
-void encrypt(const std::string &passwd, const std::vector<unsigned char> &plaintext, std::vector<unsigned char> &ciphertext){
-	std::vector<unsigned char> header;
-	header.reserve(HEADER_LENGTH);
-
-	// encrypt
-	crypto::encrypt(passwd, plaintext, ciphertext);
-
-	// write magic
-	header.push_back('S'); header.push_back('C'); header.push_back('R');
-	header.push_back('A'); header.push_back('M'); header.push_back('B');
-	header.push_back('L'); header.push_back('E'); header.push_back('D');
-
-	// write checksum
-	const unsigned long long check = checksum(ciphertext);
-	const unsigned char *const check_char = (const unsigned char*)&check;
-	for(unsigned i = 0; i < sizeof(check); ++i)
-		header.push_back(check_char[i]);
-
-	// insert the header to the beginning of ciphertext
-	ciphertext.insert(ciphertext.begin(), header.begin(), header.end());
-}
-
-void decrypt(const std::string &passwd, const std::vector<unsigned char> &cipher, std::vector<unsigned char> &plaintext){
-	std::vector<unsigned char> ciphertext = cipher;
-	try{
-		// erase the header
-		ciphertext.erase(ciphertext.begin(), ciphertext.begin() + HEADER_LENGTH);
-
-		// decrypt
-		crypto::decrypt(passwd, ciphertext, plaintext);
-	}catch(const crypto::exception &e){
-		throw scrambler_exception(std::string("decryption error: ") + e.what());
-	}
-}
-
-// return file contents
-void read(const std::string &fname, std::vector<unsigned char> &contents){
-	// open the file
-	std::ifstream in(fname);
-	if(!in)
-		throw scrambler_exception("file \"" + fname + "\" does not exist.");
-
-	// read the file
-	const int CHUNK = 2048;
-	int place = 0;
-	while(!in.eof()){
-		contents.resize(contents.size() + CHUNK);
-		in.read((char*)&contents.at(place), CHUNK);
-		place += in.gcount();
-	}
-	contents.resize(place);
-}
-
-// write file data
-void write(const std::string &fname, std::vector<unsigned char> &contents){
-	{
-		// check to see if the file already exists
-		std::ifstream test(fname);
-		if(!!test)
-			throw scrambler_exception("could not create file \"" + fname + "\", that file already exists!");
-	}
-	// open file
-	std::ofstream out(fname);
-	if(!out)
-		throw scrambler_exception("could not open \"" + fname + "\" in write mode");
-
-	out.write((char*)&contents[0], contents.size());
 }
