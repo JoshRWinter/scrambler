@@ -105,9 +105,10 @@ void crypto::encrypt(const std::string &passwd, const std::vector<unsigned char>
 
 	ciphertext.resize(plaintext.size() + BLOCK_SIZE - 1);
 
-	const int written = encrypt.encrypt(plaintext.data(), plaintext.size(), ciphertext.data(), ciphertext.size());
-	ciphertext.resize(written + BLOCK_SIZE);
-	encrypt.finalize(ciphertext.data() + written, ciphertext.size() - written);
+	const int written1 = encrypt.encrypt(plaintext.data(), plaintext.size(), ciphertext.data(), ciphertext.size());
+	ciphertext.resize(written1 + BLOCK_SIZE);
+	const int written2 = encrypt.finalize(ciphertext.data() + written1, ciphertext.size() - written1);
+	ciphertext.resize(written1 + written2);
 }
 
 void crypto::decrypt(const std::string &passwd, const std::vector<unsigned char> &ciphertext, std::vector<unsigned char> &plaintext){
@@ -115,7 +116,8 @@ void crypto::decrypt(const std::string &passwd, const std::vector<unsigned char>
 
 	plaintext.resize(ciphertext.size() + BLOCK_SIZE);
 
-	const int written = decrypt.decrypt(ciphertext.data(), ciphertext.size(), plaintext.data(), plaintext.size());
-	plaintext.resize(written + BLOCK_SIZE);
-	decrypt.finalize(plaintext.data() + written, plaintext.size() - written);
+	const int written1 = decrypt.decrypt(ciphertext.data(), ciphertext.size(), plaintext.data(), plaintext.size());
+	plaintext.resize(written1 + BLOCK_SIZE);
+	const int written2 = decrypt.finalize(plaintext.data() + written1, plaintext.size() - written1);
+	plaintext.resize(written1 + written2);
 }
