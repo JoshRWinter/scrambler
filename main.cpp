@@ -11,6 +11,7 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <termios.h>
 #endif
 
 #include "crypto.h"
@@ -25,7 +26,7 @@ enum class task{
 	unlock
 };
 
-class scrambler_exception : std::exception{
+class scrambler_exception : public std::exception{
 public:
 	scrambler_exception(const std::string &msg)
 		:message(msg){}
@@ -36,12 +37,12 @@ private:
 	const std::string message;
 };
 
-static int run(const std::string&, const std::string&);
 static void help();
 
+static std::string getpassword();
 static unsigned long long checksum(const unsigned char*, unsigned);
-static void encrypt(const std::string&, const std::string&);
-static void decrypt(const std::string&, const std::string&);
+static void encrypt(const std::string&);
+static void decrypt(const std::string&);
 
 static int read(std::ifstream&, std::vector<unsigned char>&);
 static void write(std::ofstream&, const std::vector<unsigned char>&);
@@ -56,18 +57,6 @@ int main(int argc, char **argv){
 	const std::string operation = argv[1];
 	const std::string filename = argv[2];
 
-	try{
-		const int ret = run(operation, filename);
-		return ret;
-	}catch(const scrambler_exception &e){
-		std::cout << "error: " << e.what() << std::endl;
-	}
-
-	return 1;
-}
-
-// the main logic
-int run(const std::string &operation, const std::string &filename){
 	// figure out whether to lock or unlock the file
 	task action;
 	if(operation == "lock")
@@ -79,20 +68,14 @@ int run(const std::string &operation, const std::string &filename){
 		return 1;
 	}
 
-	const std::string password = getpass("enter password: ");
-	if(action == task::lock){
-		const std::string confirm = getpass("confirm password: ");
-		if(confirm != password){
-			std::cout << "passwords do not match!" << std::endl;
-			return 1;
-		}
-	}
-
-	if(action == task::lock){
-		encrypt(password, filename);
-	}
-	else if(action == task::unlock){
-		decrypt(password, filename);
+	try{
+		if(action == task::lock)
+			encrypt(filename);
+		else if(action == task::unlock)
+			decrypt(filename);
+	}catch(const std::exception &e){
+		std::cerr << "error: " << e.what() << std::endl;
+		return 1;
 	}
 
 	return 0;
@@ -103,7 +86,7 @@ void help(){
 	std::cout << "help" << std::endl;
 }
 
-void encrypt(const std::string &passwd, const std::string &fname){
+void encrypt(const std::string &fname){
 	// test to see if output file already exists
 	{
 		std::ifstream test(fname + ".lock");
@@ -135,6 +118,13 @@ void encrypt(const std::string &passwd, const std::string &fname){
 	std::vector<unsigned char> plaintext;
 	std::vector<unsigned char> ciphertext;
 	plaintext.resize(CHUNK_SIZE);
+
+	// get the password
+	std::cout << "enter password: " << std::flush;
+	const std::string passwd = getpassword();
+	std::cout << "confirm password: " << std::flush;
+	if(getpassword() != passwd)
+		throw scrambler_exception("passwords do not match");
 
 	// encryption stream object
 	crypto::encrypt_stream stream(passwd);
@@ -191,7 +181,7 @@ void encrypt(const std::string &passwd, const std::string &fname){
 	remove(fname.c_str());
 }
 
-void decrypt(const std::string &passwd, const std::string &fname){
+void decrypt(const std::string &fname){
 	// test if file has correct name format
 	const unsigned index = fname.rfind(".lock");
 	const std::string output_fname = fname.substr(0, fname.size() - 5);
@@ -221,6 +211,10 @@ void decrypt(const std::string &passwd, const std::string &fname){
 	// read the plaintext checksum
 	unsigned long long plaintext_checksum;
 	in.read((char*)&plaintext_checksum, sizeof(plaintext_checksum));
+
+	// get the password
+	std::cout << "enter password: " << std::flush;
+	const std::string passwd = getpassword();
 
 	// output file stream
 	std::ofstream out(output_fname, std::ifstream::binary);
@@ -330,6 +324,39 @@ long long filesize(const std::string &fname){
 	struct stat buff;
 	stat(fname.c_str(), &buff);
 	return buff.st_size;
+#endif // _WIN32
+}
+
+// get password
+std::string getpassword(){
+#ifdef _WIN32
+	throw scrambler_exception("unimplemented password");
+#else
+	termios term;
+	tcgetattr(1, &term);
+	term.c_lflag &= ~ECHO;
+	tcsetattr(1, TCSANOW, &term);
+
+	std::string passwd;
+	for(;;){
+		const char c = fgetc(stdin);
+
+		if(c == '\n') // newline
+			break;
+		else if(c == '\b'){ // backspace
+			if(passwd.size() > 0)
+				passwd.erase(passwd.end() - 1);
+		}
+		else // regular char
+			passwd.push_back(c);
+	}
+
+	term.c_lflag |= ECHO;
+	tcsetattr(1, TCSANOW, &term);
+
+	std::cout << std::endl;
+
+	return passwd;
 #endif // _WIN32
 }
 
