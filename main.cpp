@@ -7,6 +7,7 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <conio.h>
 #else
 #include <unistd.h>
 #include <sys/types.h>
@@ -93,6 +94,11 @@ int main(int argc, char **argv){
 			decrypt(filename);
 	}catch(const std::exception &e){
 		std::cerr << "error: " << e.what() << std::endl;
+
+#ifdef _WIN32
+		std::cout << "\npress any key to continue..." << std::flush;
+		getch();
+#endif // _WIN32
 		return 1;
 	}
 
@@ -109,6 +115,11 @@ void help(){
 	;
 
 	std::cout << helptext << std::flush;
+
+#ifdef _WIN32
+	std::cout << "\npress any key to continue..." << std::flush;
+	getch();
+#endif // WIN32
 }
 
 void encrypt(const std::string &fname){
@@ -123,11 +134,20 @@ void encrypt(const std::string &fname){
 	if(fname.rfind(".lock") != std::string::npos)
 		throw scrambler_exception("file \"" + fname + "\" is already locked!");
 
-	// file streams
+	// input file stream
+	const long long filelen = filesize(fname);
 	std::ifstream in(fname, std::ifstream::binary);
 	if(!in)
 		throw scrambler_exception("could not open file \"" + fname + "\" in read mode");
-	const long long filelen = filesize(fname);
+
+	// get the password
+	std::cout << "enter password: " << std::flush;
+	const std::string passwd = getpassword();
+	std::cout << "confirm password: " << std::flush;
+	if(getpassword() != passwd)
+		throw scrambler_exception("passwords do not match");
+
+	// output file stream
 	std::ofstream out(fname + ".lock", std::ifstream::binary);
 	if(!out)
 		throw scrambler_exception("could not open file \"" + fname + ".lock\" in write mode");
@@ -143,13 +163,6 @@ void encrypt(const std::string &fname){
 	std::vector<unsigned char> plaintext;
 	std::vector<unsigned char> ciphertext;
 	plaintext.resize(CHUNK_SIZE);
-
-	// get the password
-	std::cout << "enter password: " << std::flush;
-	const std::string passwd = getpassword();
-	std::cout << "confirm password: " << std::flush;
-	if(getpassword() != passwd)
-		throw scrambler_exception("passwords do not match");
 
 	// encryption stream object
 	crypto::encrypt_stream stream(passwd);
@@ -203,6 +216,7 @@ void encrypt(const std::string &fname){
 	out.write((char*)&plaintext_checksum, sizeof(plaintext_checksum));
 
 	// remove the original file
+	in.close();
 	remove(fname.c_str());
 }
 
@@ -221,10 +235,10 @@ void decrypt(const std::string &fname){
 	}
 
 	// input file stream
+	const long long filelen = filesize(fname);
 	std::ifstream in(fname, std::ifstream::binary);
 	if(!in)
 		throw scrambler_exception("could not open file \"" + fname + "\" in read mode");
-	const long long filelen = filesize(fname);
 
 	// read the header
 	char header[10] = "xxxxxxxxx";
@@ -344,10 +358,18 @@ void write(std::ofstream &out, const std::vector<unsigned char> &contents){
 
 long long filesize(const std::string &fname){
 #ifdef _WIN32
-	throw scrambler_exception("not implemented filesize");
+	HANDLE file = CreateFile(fname.c_str(), GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+	if(file == INVALID_HANDLE_VALUE)
+		throw scrambler_exception("could not stat file \"" + fname + "\" (" + std::to_string(GetLastError()) + ")");
+
+	LARGE_INTEGER li;
+	GetFileSizeEx(file, &li);
+	CloseHandle(file);
+	return li.QuadPart;
 #else
 	struct stat buff;
-	stat(fname.c_str(), &buff);
+	if(0 != stat(fname.c_str(), &buff))
+		throw scrambler_exception("could not stat file \"" + fname + "\"");
 	return buff.st_size;
 #endif // _WIN32
 }
@@ -355,7 +377,28 @@ long long filesize(const std::string &fname){
 // get password
 std::string getpassword(){
 #ifdef _WIN32
-	throw scrambler_exception("unimplemented password");
+	std::string passwd;
+
+	for(;;){
+		const int c = getch();
+
+		if(c == '\r') // newline
+			break;
+		else if(c == '\b'){ // backspace
+			if(passwd.size() > 0){
+				passwd.erase(passwd.end() - 1);
+				std::cout << "\b \b" << std::flush;
+			}
+		}
+		else{
+			passwd.push_back(c);
+			std::cout << "*" << std::flush;
+		}
+	}
+
+	std::cout << std::endl;
+
+	return passwd;
 #else
 	termios term;
 	tcgetattr(1, &term);
