@@ -49,13 +49,31 @@ static void write(std::ofstream&, const std::vector<unsigned char>&);
 static long long filesize(const std::string&);
 
 int main(int argc, char **argv){
-	if(argc != 3){
+	std::string operation;
+	std::string filename;
+
+	if(argc == 2){
+		std::cout << "select a mode [unlock|lock]: " << std::flush;
+		std::string mode;
+		std::getline(std::cin, mode);
+
+		if(mode == "lock" || mode == "unlock"){
+			operation = mode;
+			filename = argv[1];
+		}
+		else{
+			help();
+			return 1;
+		}
+	}
+	else if(argc == 3){
+		operation = argv[1];
+		filename = argv[2];
+	}
+	else{
 		help();
 		return 1;
 	}
-
-	const std::string operation = argv[1];
-	const std::string filename = argv[2];
 
 	// figure out whether to lock or unlock the file
 	task action;
