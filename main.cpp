@@ -101,7 +101,14 @@ int main(int argc, char **argv){
 
 // help text
 void help(){
-	std::cout << "help" << std::endl;
+	const char *const helptext =
+	"scrambler - encrypt/decrypt a file with AES-256 (CBC) using OpenSSL\n"
+	"usage:\n"
+	"scrambler file1.txt\n"
+	"scrambler lock|unlock file1.txt\n"
+	;
+
+	std::cout << helptext << std::flush;
 }
 
 void encrypt(const std::string &fname){
