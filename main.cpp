@@ -120,7 +120,7 @@ void encrypt(const std::string &fname){
 	}
 
 	// see if file is already locked
-	if(fname.rfind(".lock") == fname.size() - 5)
+	if(fname.rfind(".lock") != std::string::npos)
 		throw scrambler_exception("file \"" + fname + "\" is already locked!");
 
 	// file streams
